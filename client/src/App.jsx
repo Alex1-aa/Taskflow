@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import TaskForm from './components/TaskForm.jsx'
 import TaskList from './components/TaskList.jsx'
+import { localRequest } from './localTasks.js'
 
 const API_URL = '/api/tasks'
 
@@ -66,11 +67,24 @@ function Icon({ name, size = 18 }) {
   )
 }
 
+// Thrown when there is no task API to talk to (network failure, or a host that
+// serves a 404/HTML page instead), so the app can fall back to browser storage.
+class ApiUnavailableError extends Error {}
+
 async function request(path = '', options = {}) {
-  const response = await fetch(`${API_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  })
+  let response
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...options.headers },
+      ...options,
+    })
+  } catch {
+    throw new ApiUnavailableError('The task API is unreachable.')
+  }
+  const isJson = response.headers.get('content-type')?.includes('application/json')
+  if (response.status !== 204 && !isJson) {
+    throw new ApiUnavailableError('The task API is unreachable.')
+  }
   const data = response.status === 204 ? null : await response.json()
   if (!response.ok) throw new Error(data?.error || 'The API request failed.')
   return data
@@ -89,6 +103,8 @@ export default function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [apiOnline, setApiOnline] = useState(false)
+  const [localMode, setLocalMode] = useState(false)
+  const send = localMode ? localRequest : request
 
   const loadTasks = useCallback(async () => {
     setLoading(true)
@@ -97,9 +113,15 @@ export default function App() {
       const data = await request()
       setTasks(data)
       setApiOnline(true)
+      setLocalMode(false)
     } catch (requestError) {
       setApiOnline(false)
-      setError(requestError.message)
+      if (requestError instanceof ApiUnavailableError) {
+        setTasks(await localRequest())
+        setLocalMode(true)
+      } else {
+        setError(requestError.message)
+      }
     } finally {
       setLoading(false)
     }
@@ -136,7 +158,7 @@ export default function App() {
     setError('')
     try {
       if (isEditing) {
-        const updatedTask = await request(`/${editingTask.id}`, {
+        const updatedTask = await send(`/${editingTask.id}`, {
           method: 'PUT',
           body: JSON.stringify(values),
         })
@@ -146,14 +168,14 @@ export default function App() {
         setEditingTask(null)
         setNotice('Task updated successfully.')
       } else {
-        const createdTask = await request('', {
+        const createdTask = await send('', {
           method: 'POST',
           body: JSON.stringify(values),
         })
         setTasks((current) => [createdTask, ...current])
         setNotice('Task added to the queue.')
       }
-      setApiOnline(true)
+      setApiOnline(!localMode)
     } catch (requestError) {
       setError(requestError.message)
       throw requestError
@@ -166,7 +188,7 @@ export default function App() {
     setActionLoading(task.id)
     setError('')
     try {
-      const updatedTask = await request(`/${task.id}`, {
+      const updatedTask = await send(`/${task.id}`, {
         method: 'PUT',
         body: JSON.stringify({ completed: !task.completed }),
       })
@@ -174,7 +196,7 @@ export default function App() {
         current.map((item) => (item.id === updatedTask.id ? updatedTask : item)),
       )
       setNotice(updatedTask.completed ? 'Task marked complete.' : 'Task returned to pending.')
-      setApiOnline(true)
+      setApiOnline(!localMode)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -187,11 +209,11 @@ export default function App() {
     setActionLoading(task.id)
     setError('')
     try {
-      await request(`/${task.id}`, { method: 'DELETE' })
+      await send(`/${task.id}`, { method: 'DELETE' })
       setTasks((current) => current.filter((item) => item.id !== task.id))
       if (editingTask?.id === task.id) setEditingTask(null)
       setNotice('Task removed from the queue.')
-      setApiOnline(true)
+      setApiOnline(!localMode)
     } catch (requestError) {
       setError(requestError.message)
     } finally {
@@ -231,23 +253,29 @@ export default function App() {
         <div className="api-card" id="api-surface">
           <div className="api-card-header">
             <span>RUNTIME STATUS</span>
-            <span className={`status-dot ${apiOnline ? 'online' : 'offline'}`} />
+            <span className={`status-dot ${apiOnline || localMode ? 'online' : 'offline'}`} />
           </div>
           <div className="api-status">
-            {apiOnline ? 'API ONLINE' : loading ? 'CONNECTING' : 'API OFFLINE'}
+            {apiOnline
+              ? 'API ONLINE'
+              : localMode
+                ? 'LOCAL MODE'
+                : loading
+                  ? 'CONNECTING'
+                  : 'API OFFLINE'}
           </div>
           <div className="api-meta">
             <span>POST /api/tasks</span>
-            <span>MEMORY</span>
+            <span>{localMode ? 'BROWSER' : 'MEMORY'}</span>
           </div>
           <div className="api-meter">
-            <span style={{ width: apiOnline ? '100%' : '18%' }} />
+            <span style={{ width: apiOnline || localMode ? '100%' : '18%' }} />
           </div>
         </div>
 
         <div className="sidebar-footer">
           <span>BUILD 1.0.0</span>
-          <span>IN-MEMORY</span>
+          <span>{localMode ? 'LOCAL STORAGE' : 'IN-MEMORY'}</span>
         </div>
       </aside>
 
